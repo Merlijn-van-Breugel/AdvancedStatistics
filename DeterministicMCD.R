@@ -13,6 +13,9 @@
 ##            implementations.  Of course you can define any additional
 ##            functions you may need.
 
+## Load packages
+install.packages("robustbase")
+library(robustbase)
 
 
 ## Functions for initial estimators
@@ -23,17 +26,20 @@
 
 # correlation matrix based on the hyperbolic tangent
 corHT <- function(z) {
-  # *enter your code here*
+    a <- apply(z,2, function(x) tanh(x),na.omit=TRUE)
+    return(cor(a))
 }
 
 # spearman correlation matrix
 corSpearman <- function(z) {
-  # *enter your code here*
+    a <- apply(z,2,function(x) rank(x))
+    return(cor(a))
 }
 
 # correlation matrix based on normal scores of the ranks
 corNSR <- function(z) {
-  # *enter your code here*
+    a <- apply(z,2, function(x) qnorm((rank(x)-1/3)/(length(x)+1/3),0,1) )
+    return(cor(a))
 }
 
 # modified spatial sign covariance matrix
@@ -73,7 +79,46 @@ rawCovOGK <- function(z) {
 #                raw estimator
 # any other output you want to return
 covDetMCD <- function(x, h, ...) {
-  # *enter your code here*
+  
+    # Standardize data
+    medianWithoutNA<-function(x) {
+        median(x[which(!is.na(x))])
+    }
+    QnWithoutNA<-function(x) {
+        Qn(x[which(!is.na(x))])
+    }
+    median <- apply(x, 2, medianWithoutNA)
+    Qn <- apply(x, 2, QnWithoutNA)
+    x.dm <- t(apply(x, 1, function(x) x - median)) 
+    Z <- t(apply(x.dm, 1, function(x) x / Qn)) 
+    
+    # Get starting values from 6 robust covariance estimates of Z
+    # Make list of functions, such that we can elegantly compute Sk
+    # Step 1
+    covf.list <- list(corHT,corSpearman,corNSR,covMSS,covBACON1,rawCovOGK)
+    S.list <- list()
+    S.list$S1 <- corHT(Z)
+    S.list$S2 <- corSpearman(Z)
+    S.list$S3 <- corNSR(Z)
+    S.list$S4 <- covMSS(Z)
+    S.list$S5 <- covBACON1(Z)
+    S.list$S6 <- rawCovOGK(Z)
+    
+    eigen       <- lapply(S.list, eigen) 
+    eigenvec    <- lapply(eigen, `[[`, 2)
+    V           <- lapply(eigenvec, function(x) Z %*% x) 
+    
+    # Step 2
+    Qn.V        <- lapply(V, function(x) apply(x, 2, QnWithoutNA))
+    L           <- lapply(Qn.V, function(x) diag(x^2))
+    Sigma       <- lapply(seq(1,length(S.list)), function(x) eigenvec[[x]] %*% L[[x]] %*% t(eigenvec[[x]]))
+    
+    # Step 3
+    Sigma.chol  <- lapply(Sigma,function(x) chol(x))
+    mu          <- lapply(Sigma.chol,function(x) x %*% apply(Z %*% solve(x), 2, medianWithoutNA))
+    
+    # Get distance 
+    D           <- lapply(seq(1,length(S.list)), function(x) mahalanobis(Z, mu[[x]],Sigma[[x]]))
 }
 
 
