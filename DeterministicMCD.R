@@ -21,8 +21,7 @@ library(robustbase)
 
 # We see quite a large number of cells with NA value
 # This is problematic for correlation and distance calculation, hence we omit these rows
-x <- na.omit(TopGear)
-x <- x[,9:15]
+x <- na.omit(TopGear[,9:15])
 
 ## Functions for initial estimators
 
@@ -82,6 +81,7 @@ rawCovOGK <- function(z) {
 
 # Put all covariance functions in a list
 cov.fun.list <- list(corHT, corSpearman, corNSR, covMSS, covBACON1, rawCovOGK)
+cov.fun.list <- list(corHT, corSpearman, corNSR) 
 
 ## Main function for deterministic MCD algorithm
 
@@ -101,7 +101,7 @@ cov.fun.list <- list(corHT, corSpearman, corNSR, covMSS, covBACON1, rawCovOGK)
 # best ......... indices of the observations in the best subset found by the
 #                raw estimator
 # any other output you want to return
-covDetMCD <- function(x, h, cov.fun.list, eps, ...) {
+covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, ...) {
     
     # Standardize data
     medianWithoutNA<-function(x) {
@@ -110,21 +110,16 @@ covDetMCD <- function(x, h, cov.fun.list, eps, ...) {
     QnWithoutNA<-function(x) {
         Qn(x[which(!is.na(x))])
     }
-    median <- apply(x, 2, medianWithoutNA)
-    Qn <- apply(x, 2, QnWithoutNA)
-    x.dm <- t(apply(x, 1, function(x) x - median)) 
-    Z <- t(apply(x.dm, 1, function(x) x / Qn)) 
-    
+    median  <- apply(x, 2, medianWithoutNA)
+    Qn      <- apply(x, 2, QnWithoutNA)
+    x.dm    <- t(apply(x, 1, function(x) x - median)) 
+    Z       <- t(apply(x.dm, 1, function(x) x / Qn)) 
+    n.parm  <- ncol(Z)
+    n.obs   <- nrow(Z)    
     # Get starting values from 6 robust covariance estimates of Z
     # Make list of functions, such that we can elegantly compute Sk
     # Step 1
-    S.list <- list()
-    S.list$S1 <- corHT(Z)
-    S.list$S2 <- corSpearman(Z)
-    S.list$S3 <- corNSR(Z)
-    S.list$S4 <- covMSS(Z)
-    S.list$S5 <- covBACON1(Z)
-    S.list$S6 <- rawCovOGK(Z)    
+    S.list <- lapply(cov.fun.list, function(x) x(Z)) 
     
     eigen       <- lapply(S.list, eigen) 
     eigenvec    <- lapply(eigen, `[[`, 2)
@@ -143,8 +138,8 @@ covDetMCD <- function(x, h, cov.fun.list, eps, ...) {
     D           <- lapply(seq(1,length(S.list)), function(x) mahalanobis(Z, mu[[x]],Sigma[[x]]))
    
     # Get h smallest distance values
-    ind         <- lapply(D, function(x) sort(x)[1:h]) 
-    H.0         <- lapply(ind, function(x) Z[names(x),]) 
+    ind         <- lapply(D, function(x) sort(x)[1:h0]) 
+    H0          <- lapply(ind, function(x) Z[names(x),]) 
     
     
     ## Write function to converge to smallest subset
@@ -171,10 +166,45 @@ covDetMCD <- function(x, h, cov.fun.list, eps, ...) {
                     det   <- det(H.cov.new),
                     H.cov <- H.cov.new,
                     iter  <- iter,
-                    H.mean <- colMeans(H)))
+                    H.mean <- colMeans(H)),
+                    best  <- ind)
     }
-    local.opt <- lapply(H.0, function(x) loopTillConv(x,eps))     
+    
+    local.opt <- lapply(H0, function(x) loopTillConv(x,eps))   
+    # Get determinants of local.opt
+    local.det <- lapply(local.opt, `[[`, 2)
+    # Get rawDetMCD by choosing smallest from local.det and get corresponding output elements from convergence FUN
+    rawDetMCD <- local.opt[which(local.det==min(unlist(local.det)))[1]]
+    
+    # Correct the covariance estimate with Fisher correction
+    alpha   <- h / nrow(Z)
+    cor.fac <- alpha / pgamma(q = qchisq(p = alpha, df = n.parm)/2, shape = (n.parm/2 + 1), rate = 1) 
+    # We may want to add a small sample correction
+    
+    # Get distance with adjusted covariance matrix, using cor.fac
+    D       <- mahalanobis(Z, rawDetMCD[[1]], rawDetMCD[[3]]*cor.fac)
+    # Determine weights
+    thres   <- qchisq(p = 1-delta, df = n.parm)
+    weights <- as.numeric(D <= thres)
+    
+    # MCD estimates
+    T.rwgt  <- (1/sum(weights)) * t(weights) %*% Z
+    Z.cent.weighted <-  weights * t(apply(Z, 1, function(x) x - T.rwgt))
+    S.rwgt  <- (1/sum(weights)) * t(Z.cent.weighted) %*% Z.cent.weighted
 
+    cor.fac <- (1 - delta) / pgamma(q = qchisq(p = 1 - delta, df = n.parm)/2, shape = (n.parm/2 + 1), rate = 1)     
+    Sigma.rwgt <- cor.fac * S.rwgt
+    
+    # Make output list
+    output.list <- list(center     <- T.rwgt,
+                        cov        <- Sigma.rwgt,
+                        weights    <- weights,
+                        raw.center <- rawDetMCD$mean,
+                        raw.cov    <- rawDetMCD$cov,
+                        best       <- rawDetMCD$best)
+                        
+                        
+    )
 }
 
 
