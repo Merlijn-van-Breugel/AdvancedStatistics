@@ -14,7 +14,7 @@
 ##            functions you may need.
 
 ## Load packages
-install.packages("robustbase")
+# install.packages("robustbase")
 library(robustbase)
 
 ## Prepare data
@@ -65,7 +65,6 @@ covBACON1 <- function(z) {
     return(cov(b))
 }
 
-library(robustbase)
 # raw OGK estimator of the covariance matrix with median and Qn
 # Hint: have a look at function covOGK() in package robustbase
 
@@ -125,6 +124,7 @@ covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, ...) {
     QnWithoutNA<-function(x) {
         Qn(x[which(!is.na(x))])
     }
+    rownames(x) <- as.character(seq(1:nrow(x)))
     median  <- apply(x, 2, medianWithoutNA)
     Qn      <- apply(x, 2, QnWithoutNA)
     x.dm    <- t(apply(x, 1, function(x) x - median)) 
@@ -151,9 +151,9 @@ covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, ...) {
     
     # Get distance 
     D           <- lapply(seq(1,length(S.list)), function(x) mahalanobis(Z, mu[[x]],Sigma[[x]]))
-   
+
     # Get h smallest distance values
-    ind         <- lapply(D, function(x) sort(x)[1:h0]) 
+    ind         <- lapply(D, function(x) sort(x)[1:h0])
     H0          <- lapply(ind, function(x) Z[names(x),]) 
     names(H0)   <- names(cov.fun.list)
     
@@ -187,7 +187,7 @@ covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, ...) {
     local.opt <- lapply(H0, function(x) loopTillConv(x,eps))   
     # Get determinants of local.opt
     local.det <- lapply(local.opt, `[[`, 2)
-    opt.cov.fun   <-  names(which(local.det==min(unlist(local.det))))
+    opt.cov.fun   <-  names(which(local.det==min(unlist(local.det))))[1]
     # Get rawDetMCD by choosing smallest from local.det and get corresponding output elements from convergence FUN
     rawDetMCD <- local.opt[[opt.cov.fun]]
     
@@ -216,7 +216,8 @@ covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, ...) {
                         weights    = weights,
                         raw.center = rawDetMCD$mean,
                         raw.cov    = rawDetMCD$cov,
-                        best       = rawDetMCD$best)
+                        best       = rawDetMCD$best,
+                        opt.cov.fun = opt.cov.fun)
                         
                         
     
@@ -228,10 +229,14 @@ test <- covDetMCD(x, h0, h, cov.fun.list, eps, delta)
 ## Function for regression based on the deterministic MCD
 
 # Input:
-# x ... matrix of explanatory variables
-# y ... response variable
-# h ... subset size
-# anything else you need
+# x .............. matrix of explanatory variables
+# y .............. response variable
+# MCD.varlist .... containing all setup parameters for covDetMCD
+#    h0 .......... size of conservative first subset
+#    h ........... subset size
+#    cov.fun.list. list with covariance functions
+#    eps ......... tolerance level for convergence           
+#    delta ....... quantile size for weight determination        
 
 # Output
 # A list with the following components:
@@ -243,8 +248,13 @@ test <- covDetMCD(x, h0, h, cov.fun.list, eps, delta)
 #                   function covDetMCD())
 # any other output you want to return
 
-lmDetMDC <- function(x, y, h, ...) {
-    MCD   <- covDetMCD(cbind(x,y),h)
+lmDetMDC <- function(x, y, MCD.varlist) {
+    MCD   <- covDetMCD(x            = cbind(x,y), 
+                       h0           = MCD.varlist$h0, 
+                       h            = MCD.varlist$h, 
+                       cov.fun.list = MCD.varlist$cov.fun.list, 
+                       eps          = MCD.varlist$eps, 
+                       delta        = MCD.varlist$delta)
     Sig   <- MCD$cov
     mu    <- MCD$center
     SigXX <- Sig[1:ncol(x),1:ncol(x)]
@@ -255,13 +265,15 @@ lmDetMDC <- function(x, y, h, ...) {
     res   <- y - yfit
     coefficients <- matrix(c(alpha,beta),1,length(beta)+1)
     colnames(coefficients) <- c("(intercept)",sprintf("beta",seq(1:length(beta))))
-    results <- list("coefficients" = coefficients, "fitted.values" = yfit, 
-                    "residuals" = res, "MCD" = MCD )
+    results <- list(coefficients  = coefficients, 
+                    fitted.values = yfit, 
+                    residuals     = res, 
+                    MCD           = MCD )
     return(results)
 }
 
 # SIMULATION FUNCTION
-RobustSimulation <- function(n, sim,  cont.level, cont.type){
+RobustSimulation <- function(n, sim,  cont.level, cont.type, MCD.varlist, ...){
     coef.list <- list(MCD = matrix(NA, sim, 2),
                       lm = matrix(NA, sim, 2),
                       LTS = matrix(NA, sim, 2),
@@ -278,25 +290,34 @@ RobustSimulation <- function(n, sim,  cont.level, cont.type){
         }  else {
             y[1:(cont.level*n)] <-   rnorm(cont.level*n, 30 , sd=2)
         }
-        #  MCD  <- lmDetMDC(x,y,h, ... )
+        MCD  <- lmDetMDC(x,y,MCD.varlist = MCD.varlist) 
         lm   <- lm(y~x)
         LTS  <- ltsReg(y~x)
         MM   <- lmrob(y~x)
-        #  coef.list$MCD[i,] <-
-        coef.list$lm[i,] <- lm$coefficients
-        coef.list$LTS[i,]<- LTS$coefficients
-        coef.list$MM[i,] <- MM$coefficients
+        coef.list$MCD[i,]   <- MCD$coefficients
+        coef.list$lm[i,]    <- lm$coefficients
+        coef.list$LTS[i,]   <- LTS$coefficients
+        coef.list$MM[i,]    <- MM$coefficients
         
-        #  var.list$MCD[i,] <- 
-        var.list$lm[i,]  <- lm$
-            var.list$LTS[i,]
-        var.list$MCD[i,]
         
     }
     return(coef.list)
 }
 
-sim1 <- RobustSimulation(n=400, sim=100, cont.level = 0.3, cont.type = "BadLev")
+# Easier to work with alphas instead of h and h0
+n       <- 400
+alpha0  <- 0.5
+alpha   <- 0.8
+
+MCD.varlist <- list(
+                    h0           = alpha0*n,  
+                    h            = alpha*n,
+                    cov.fun.list = cov.fun.list, 
+                    eps          = 1e-10, 
+                    delta        = 0.02 
+                    )
+sim1        <- RobustSimulation(n=400, sim=100, cont.level = 0.3, cont.type = "BadLev", MCD.varlist = MCD.varlist)
+
 
 hist(sim1$lm[,2])
 hist(sim1$LTS[,2])
