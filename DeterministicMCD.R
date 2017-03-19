@@ -93,9 +93,18 @@ cov.fun.list <- list(corHT = corHT,
                      covMSS = covMSS, 
                      covBACON1 = covBACON1, 
                      rawCovOGK = rawCovOGK)
-cov.fun.list <- list(corHT = corHT, 
-                     corSpearman = corSpearman, 
-                     corNSR = corNSR) 
+# cov.fun.list <- list(corHT = corHT, 
+#                      corSpearman = corSpearman, 
+#                      corNSR = corNSR) 
+
+
+# Standardize functions for list
+medianWithoutNA<-function(x) {
+    median(x[which(!is.na(x))])
+}
+QnWithoutNA<-function(x) {
+    Qn(x[which(!is.na(x))])
+}
 
 ## Main function for deterministic MCD algorithm
 
@@ -115,22 +124,18 @@ cov.fun.list <- list(corHT = corHT,
 # best ......... indices of the observations in the best subset found by the
 #                raw estimator
 # any other output you want to return
-covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, ...) {
+covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, standardize = TRUE, ...) {
     
-    # Standardize data
-    medianWithoutNA<-function(x) {
-        median(x[which(!is.na(x))])
-    }
-    QnWithoutNA<-function(x) {
-        Qn(x[which(!is.na(x))])
-    }
     rownames(x) <- as.character(seq(1:nrow(x)))
-    median  <- apply(x, 2, medianWithoutNA)
-    Qn      <- apply(x, 2, QnWithoutNA)
-    x.dm    <- t(apply(x, 1, function(x) x - median)) 
-    Z       <- t(apply(x.dm, 1, function(x) x / Qn)) 
-    n.parm  <- ncol(Z)
-    n.obs   <- nrow(Z)    
+    
+    if (standardize == TRUE){
+        median  <- apply(x, 2, medianWithoutNA)
+        Qn      <- apply(x, 2, QnWithoutNA)
+        x.dm    <- t(apply(x, 1, function(x) x - median)) 
+        Z       <- t(apply(x.dm, 1, function(x) x / Qn)) 
+    }else{Z <- x}
+    n.parm  <- NCOL(Z)
+    n.obs   <- NROW(Z)    
     # Get starting values from 6 robust covariance estimates of Z
     # Make list of functions, such that we can elegantly compute Sk
     # Step 1
@@ -187,9 +192,13 @@ covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, ...) {
     local.opt <- lapply(H0, function(x) loopTillConv(x,eps))   
     # Get determinants of local.opt
     local.det <- lapply(local.opt, `[[`, 2)
+    print(names(which(local.det==min(unlist(local.det)))))
     opt.cov.fun   <-  names(which(local.det==min(unlist(local.det))))[1]
     # Get rawDetMCD by choosing smallest from local.det and get corresponding output elements from convergence FUN
     rawDetMCD <- local.opt[[opt.cov.fun]]
+
+    print(rawDetMCD$H.cov)
+    print(rawDetMCD$H.mean)
     
     # Correct the covariance estimate with Fisher correction
     alpha   <- h / nrow(Z)
@@ -219,8 +228,6 @@ covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, ...) {
                         best       = rawDetMCD$best,
                         opt.cov.fun = opt.cov.fun)
                         
-                        
-    
 }
 
 # Test covDetMCD function
@@ -248,20 +255,30 @@ test <- covDetMCD(x, h0, h, cov.fun.list, eps, delta)
 #                   function covDetMCD())
 # any other output you want to return
 
-lmDetMDC <- function(x, y, MCD.varlist) {
+lmDetMCD <- function(x, y, MCD.varlist) {
     MCD   <- covDetMCD(x            = cbind(x,y), 
                        h0           = MCD.varlist$h0, 
                        h            = MCD.varlist$h, 
                        cov.fun.list = MCD.varlist$cov.fun.list, 
                        eps          = MCD.varlist$eps, 
-                       delta        = MCD.varlist$delta)
+                       delta        = MCD.varlist$delta,
+                       standardize  = MCD.varlist$standardize)
     Sig   <- MCD$cov
     mu    <- MCD$center
-    SigXX <- Sig[1:ncol(x),1:ncol(x)]
-    SigXY <- Sig[1:ncol(x),ncol(x)+1]
+    
+    # print(Sig)
+    # print(mu)
+    
+    n.parm<- NCOL(x)
+    SigXX <- Sig[1:n.parm,1:n.parm]
+    SigXY <- Sig[1:n.parm,n.parm+1]
     beta  <- solve(SigXX,SigXY)
-    alpha <- MDC$center[ncol(x)+1] - MDC$center[1:ncol(x)]%*%beta
-    yfit  <- alpha + x%*%beta
+    alpha <- MCD$center[n.parm+1] - MCD$center[1:n.parm] %*% beta
+    if (n.parm == 1) { # Can be improved
+        yfit  <- alpha + x * beta
+    }else{
+        yfit  <- alpha + x %*% beta
+    }
     res   <- y - yfit
     coefficients <- matrix(c(alpha,beta),1,length(beta)+1)
     colnames(coefficients) <- c("(intercept)",sprintf("beta",seq(1:length(beta))))
@@ -275,22 +292,33 @@ lmDetMDC <- function(x, y, MCD.varlist) {
 # SIMULATION FUNCTION
 RobustSimulation <- function(n, sim,  cont.level, cont.type, MCD.varlist, ...){
     coef.list <- list(MCD = matrix(NA, sim, 2),
-                      lm = matrix(NA, sim, 2),
+                      lm  = matrix(NA, sim, 2),
                       LTS = matrix(NA, sim, 2),
-                      MM = matrix(NA, sim, 2))
+                      MM  = matrix(NA, sim, 2))
     for(i in 1:sim){
         x <- rnorm(n, mean=5, sd= 1)
         y <- rnorm(n, -2 + x*3, sd=1) 
-        if (cont.type == "GoodLev"){
-            x[1:(cont.level*n)] <- rnorm(cont.level*n ,mean=15,sd=1)
-            y[1:(cont.level*n)] <- rnorm(cont.level*n, -2 + 3*x[1:(cont.level*n)], sd=1)
-        }  else if (cont.type == "BadLev"){
-            x[1:(cont.level*n)] <- rnorm(cont.level*n ,mean=15,sd=1)
-            y[1:(cont.level*n)] <- rnorm(cont.level*n, 10 , sd=1)
-        }  else {
-            y[1:(cont.level*n)] <-   rnorm(cont.level*n, 30 , sd=2)
+        if (cont.level > 0){
+            if (cont.type == "GoodLev"){
+                x[1:(cont.level*n)] <- rnorm(cont.level*n ,mean=15,sd=1)
+                y[1:(cont.level*n)] <- rnorm(cont.level*n, -2 + 3*x[1:(cont.level*n)], sd=1)
+            }  else if (cont.type == "BadLev"){
+                x[1:(cont.level*n)] <- rnorm(cont.level*n ,mean=15,sd=1)
+                y[1:(cont.level*n)] <- rnorm(cont.level*n, 10 , sd=1)
+            }  else {
+                y[1:(cont.level*n)] <-   rnorm(cont.level*n, 30 , sd=2)
+            }
         }
-        MCD  <- lmDetMDC(x,y,MCD.varlist = MCD.varlist) 
+        # Standardize data for all estimation methods
+        data    <- cbind(y,x)
+        median  <- apply(data, 2, medianWithoutNA)
+        Qn      <- apply(data, 2, QnWithoutNA)
+        data.dm <- t(apply(data, 1, function(x) x - median)) 
+        data.st <- t(apply(data.dm, 1, function(x) x / Qn)) 
+        y       <- data.st[,1]
+        x       <- data.st[,-1]
+        
+        MCD  <- lmDetMCD(x,y,MCD.varlist = MCD.varlist) 
         lm   <- lm(y~x)
         LTS  <- ltsReg(y~x)
         MM   <- lmrob(y~x)
@@ -307,16 +335,22 @@ RobustSimulation <- function(n, sim,  cont.level, cont.type, MCD.varlist, ...){
 # Easier to work with alphas instead of h and h0
 n       <- 400
 alpha0  <- 0.5
-alpha   <- 0.8
+alpha   <- 0.95
 
 MCD.varlist <- list(
                     h0           = alpha0*n,  
                     h            = alpha*n,
                     cov.fun.list = cov.fun.list, 
                     eps          = 1e-10, 
-                    delta        = 0.02 
-                    )
-sim1        <- RobustSimulation(n=400, sim=100, cont.level = 0.3, cont.type = "BadLev", MCD.varlist = MCD.varlist)
+                    delta        = 0.02, 
+                    standardize  = FALSE)
+
+sim1        <- RobustSimulation(n=n, sim=10, cont.level = 0.3, cont.type = "BadLev", MCD.varlist = MCD.varlist)
+
+View(sim1$MCD)
+View(sim1$lm)
+View(sim1$MM)
+View(sim1$LTS)
 
 
 hist(sim1$lm[,2])
