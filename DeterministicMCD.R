@@ -15,13 +15,24 @@
 
 ## Load packages
 # install.packages("robustbase")
-library(robustbase)
+library(robustbase)   
+# install.packages("VIM")
+library(VIM)   
 
-## Prepare data
+## Prepare data  
+# Choose all relevant columns
+cols <- c("Fuel","Price","Cylinders","Displacement","DriveWheel","BHP","Torque","Acceleration",
+             "TopSpeed","Weight","Length","Width","Height","AdjustableSteering","Automatic","ClimateControl",
+             "CruiseControl","ElectricSeats","ParkingSensors","PowerSteering","SatNav","ESP","Origin")
+# We see quite a large number of missing values. Drop all observations for which MPG is NA
+TopGear.noNA.MPG <- TopGear[is.na(TopGear$MPG)==FALSE,]
+# Choose relevant columns
+x <- TopGear.noNA.MPG[,names(TopGear.noNA.MPG) %in% cols]
+MPG <- TopGear.noNA.MPG$MPG
 
-# We see quite a large number of cells with NA value
-# This is problematic for correlation and distance calculation, hence we omit these rows
-x <- na.omit(TopGear[,9:15])
+# Perform k-Nearest Neighbour imputation method
+x.noNA <- kNN(data = x, imp_var = FALSE)
+
 
 ## Functions for initial estimators
 
@@ -69,22 +80,23 @@ covBACON1 <- function(z) {
 # Hint: have a look at function covOGK() in package robustbase
 
 rawCovOGK <- function(z) {
-    D <- diag(apply(z,2,function(x) Qn(x))) 
-    Z <- t(apply(z,1, function(x) solve(D)%*%x))
-    p <- ncol(z)
-    U <- diag(p)
-    for (i in 2:p) {
-        for (j in 1:(i - 1)) {
-            U[i, j] <- 1/4*(Qn(Z[,i]+Z[,j])^2 - Qn(Z[,i]-Z[,j])^2) }
-    }
-    E <- eigen(U, symmetric=TRUE)$vectors
-    V <- Z%*%E 
-    L <- diag(apply(V,2,function(x) Qn(x))^2)
-    SIG_rawogk <- D%*%E%*%L%*%t(E)%*%t(D)
+    # D <- diag(apply(z,2,function(x) Qn(x))) 
+    # Z <- t(apply(z,1, function(x) solve(D)%*%x))
+    # p <- ncol(z)
+    # U <- diag(p)
+    # for (i in 2:p) {
+    #     for (j in 1:(i - 1)) {
+    #         U[i, j] <- 1/4*(Qn(Z[,i]+Z[,j])^2 - Qn(Z[,i]-Z[,j])^2) }
+    # }
+    # E <- eigen(U, symmetric=TRUE)$vectors
+    # V <- Z%*%E 
+    # L <- diag(apply(V,2,function(x) Qn(x))^2)
+    # SIG_rawogk <- D%*%E%*%L%*%t(E)%*%t(D)
+    SIG_rawogk <- covOGK(Z,sigmamu= s_Qn)$cov
     return(SIG_rawogk)
 }
 
-sigOGK <- covOGK(Z,sigmamu= s_Qn) #slightly different because of iterations..
+# sigOGK <- covOGK(Z,sigmamu= s_Qn) #slightly different because of iterations..
 
 # Put all covariance functions in a list
 cov.fun.list <- list(corHT = corHT, 
@@ -93,10 +105,6 @@ cov.fun.list <- list(corHT = corHT,
                      covMSS = covMSS, 
                      covBACON1 = covBACON1, 
                      rawCovOGK = rawCovOGK)
-# cov.fun.list <- list(corHT = corHT, 
-#                      corSpearman = corSpearman, 
-#                      corNSR = corNSR) 
-
 
 # Standardize functions for list
 medianWithoutNA<-function(x) {
@@ -124,16 +132,13 @@ QnWithoutNA<-function(x) {
 # best ......... indices of the observations in the best subset found by the
 #                raw estimator
 # any other output you want to return
-covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, standardize = TRUE, ...) {
+covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, ...) {
     
     rownames(x) <- as.character(seq(1:nrow(x)))
-    
-    if (standardize == TRUE){
-        median  <- apply(x, 2, medianWithoutNA)
-        Qn      <- apply(x, 2, QnWithoutNA)
-        x.dm    <- t(apply(x, 1, function(x) x - median)) 
-        Z       <- t(apply(x.dm, 1, function(x) x / Qn)) 
-    }else{Z <- x}
+    median  <- apply(x, 2, medianWithoutNA)
+    Qn      <- apply(x, 2, QnWithoutNA)
+    x.dm    <- t(apply(x, 1, function(x) x - median)) 
+    Z       <- t(apply(x.dm, 1, function(x) x / Qn)) 
     n.parm  <- NCOL(Z)
     n.obs   <- NROW(Z)    
     # Get starting values from 6 robust covariance estimates of Z
@@ -189,16 +194,17 @@ covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, standardize = TRUE, ..
                     H.mean   = colMeans(H),
                     best     = ind))
     }
+    
     local.opt <- lapply(H0, function(x) loopTillConv(x,eps))   
     # Get determinants of local.opt
     local.det <- lapply(local.opt, `[[`, 2)
-    print(names(which(local.det==min(unlist(local.det)))))
+    #print(names(which(local.det==min(unlist(local.det)))))
     opt.cov.fun   <-  names(which(local.det==min(unlist(local.det))))[1]
     # Get rawDetMCD by choosing smallest from local.det and get corresponding output elements from convergence FUN
     rawDetMCD <- local.opt[[opt.cov.fun]]
 
-    print(rawDetMCD$H.cov)
-    print(rawDetMCD$H.mean)
+    #print(rawDetMCD$H.cov)
+    #print(rawDetMCD$H.mean)
     
     # Correct the covariance estimate with Fisher correction
     alpha   <- h / nrow(Z)
@@ -211,10 +217,10 @@ covDetMCD <- function(x, h0, h, cov.fun.list, eps, delta, standardize = TRUE, ..
     thres   <- qchisq(p = 1-delta, df = n.parm)
     weights <- as.numeric(D <= thres)
     
-    # MCD estimates
-    T.rwgt  <- (1/sum(weights)) * t(weights) %*% Z
-    Z.cent.weighted <-  weights * t(apply(Z, 1, function(x) x - T.rwgt))
-    S.rwgt  <- (1/sum(weights)) * t(Z.cent.weighted) %*% Z.cent.weighted
+    # MCD estimates (these are calculated with the non-standardized data x)
+    T.rwgt  <- (1/sum(weights)) * t(weights) %*% x
+    x.cent.weighted <-  weights * t(apply(x, 1, function(x) x - T.rwgt))
+    S.rwgt  <- (1/sum(weights)) * t(x.cent.weighted) %*% x.cent.weighted
 
     cor.fac <- (1 - delta) / pgamma(q = qchisq(p = 1 - delta, df = n.parm)/2, shape = (n.parm/2 + 1), rate = 1)     
     Sigma.rwgt <- cor.fac * S.rwgt
@@ -261,8 +267,7 @@ lmDetMCD <- function(x, y, MCD.varlist) {
                        h            = MCD.varlist$h, 
                        cov.fun.list = MCD.varlist$cov.fun.list, 
                        eps          = MCD.varlist$eps, 
-                       delta        = MCD.varlist$delta,
-                       standardize  = MCD.varlist$standardize)
+                       delta        = MCD.varlist$delta)
     Sig   <- MCD$cov
     mu    <- MCD$center
     
@@ -273,7 +278,7 @@ lmDetMCD <- function(x, y, MCD.varlist) {
     SigXX <- Sig[1:n.parm,1:n.parm]
     SigXY <- Sig[1:n.parm,n.parm+1]
     beta  <- solve(SigXX,SigXY)
-    alpha <- MCD$center[n.parm+1] - MCD$center[1:n.parm] %*% beta
+    alpha <- drop(MCD$center[n.parm+1] - MCD$center[1:n.parm] %*% beta) # Make scalar instead of matrix
     if (n.parm == 1) { # Can be improved
         yfit  <- alpha + x * beta
     }else{
@@ -289,12 +294,25 @@ lmDetMCD <- function(x, y, MCD.varlist) {
     return(results)
 }
 
+# Multiple Regression function
+MultipleRegression <- function(x, y, MCD.varlist, alpha, ...){
+    MM   <- lmrob(y~x)
+    lm   <- lm(y~x)
+    LTS  <- ltsReg(y~x, alpha = alpha)
+    MCD  <- lmDetMCD(x,y,MCD.varlist = MCD.varlist) 
+    return(list(MCD = MCD,
+                lm  = lm,
+                LTS = LTS,
+                MM  = MM))
+    
+}
+    
 # SIMULATION FUNCTION
 RobustSimulation <- function(n, sim,  cont.level, cont.type, MCD.varlist, ...){
-    coef.list <- list(MCD = matrix(NA, sim, 2),
-                      lm  = matrix(NA, sim, 2),
-                      LTS = matrix(NA, sim, 2),
-                      MM  = matrix(NA, sim, 2))
+    coef.list <- list(MCD = matrix(0, sim, 2),
+                      lm  = matrix(0, sim, 2),
+                      LTS = matrix(0, sim, 2),
+                      MM  = matrix(0, sim, 2))
     for(i in 1:sim){
         x <- rnorm(n, mean=5, sd= 1)
         y <- rnorm(n, -2 + x*3, sd=1) 
@@ -304,29 +322,17 @@ RobustSimulation <- function(n, sim,  cont.level, cont.type, MCD.varlist, ...){
                 y[1:(cont.level*n)] <- rnorm(cont.level*n, -2 + 3*x[1:(cont.level*n)], sd=1)
             }  else if (cont.type == "BadLev"){
                 x[1:(cont.level*n)] <- rnorm(cont.level*n ,mean=15,sd=1)
-                y[1:(cont.level*n)] <- rnorm(cont.level*n, 10 , sd=1)
-            }  else {
-                y[1:(cont.level*n)] <-   rnorm(cont.level*n, 30 , sd=2)
+                y[1:(cont.level*n)] <- rnorm(cont.level*n, 5 , sd=1)
+            }  else if (cont.type == "VertOut"){
+                y[1:(cont.level*n)] <-   rnorm(cont.level*n, 40 , sd=2)
             }
         }
-        # Standardize data for all estimation methods
-        data    <- cbind(y,x)
-        median  <- apply(data, 2, medianWithoutNA)
-        Qn      <- apply(data, 2, QnWithoutNA)
-        data.dm <- t(apply(data, 1, function(x) x - median)) 
-        data.st <- t(apply(data.dm, 1, function(x) x / Qn)) 
-        y       <- data.st[,1]
-        x       <- data.st[,-1]
         
-        MCD  <- lmDetMCD(x,y,MCD.varlist = MCD.varlist) 
-        lm   <- lm(y~x)
-        LTS  <- ltsReg(y~x)
-        MM   <- lmrob(y~x)
-        coef.list$MCD[i,]   <- MCD$coefficients
-        coef.list$lm[i,]    <- lm$coefficients
-        coef.list$LTS[i,]   <- LTS$coefficients
-        coef.list$MM[i,]    <- MM$coefficients
-        
+        res <- MultipleRegression(x, y, MCD.varlist, alpha = alpha)
+        coef.list$MCD[i,]   <- res$MCD$coefficients
+        coef.list$lm[i,]    <- res$lm$coefficients
+        coef.list$LTS[i,]   <- res$LTS$coefficients
+        coef.list$MM[i,]    <- res$MM$coefficients
         
     }
     return(coef.list)
@@ -335,25 +341,108 @@ RobustSimulation <- function(n, sim,  cont.level, cont.type, MCD.varlist, ...){
 # Easier to work with alphas instead of h and h0
 n       <- 400
 alpha0  <- 0.5
-alpha   <- 0.95
+alpha   <- 0.75
 
 MCD.varlist <- list(
                     h0           = alpha0*n,  
                     h            = alpha*n,
                     cov.fun.list = cov.fun.list, 
                     eps          = 1e-10, 
-                    delta        = 0.02, 
-                    standardize  = FALSE)
+                    delta        = 0.025)
 
-sim1        <- RobustSimulation(n=n, sim=10, cont.level = 0.3, cont.type = "BadLev", MCD.varlist = MCD.varlist)
+sim1        <- RobustSimulation(n=n, sim=200, cont.level = 0.3, cont.type = "GoodLev", MCD.varlist = MCD.varlist, alpha = alpha)
 
-View(sim1$MCD)
-View(sim1$lm)
-View(sim1$MM)
-View(sim1$LTS)
+## Perform grid of simulation specification 
+# Contamination type - 3 options ... {Good Leverage, Bad Leverage, Vertical Outlier}
+# Contamination level - 6 .......... {0,0.1,...,0.5}
+# Subset size - 2 options .......... {0.5,0.75}
 
+cont.types.range <- c("GoodLev","BadLev","VertOut")
+cont.level.range <- seq(0,0.5,0.1)
+alpha.range      <- c(0.5,0.75)
 
-hist(sim1$lm[,2])
-hist(sim1$LTS[,2])
+n                <- 100
+sim              <- 1000
 
+MCD.varlist <- list(
+    h0           = alpha0*n,  
+    h            = NULL,
+    cov.fun.list = cov.fun.list, 
+    eps          = 1e-10, 
+    delta        = 0.025)
+
+SimulationGrid <- function(n, sim,  cont.level.range, cont.types.range, alpha.range, MCD.varlist, ...){
+    # Create data frame to write output into
+    n.options   <- length(cont.level.range)*length(cont.types.range)*length(alpha.range)
+    output      <- as.data.frame(matrix(0,n.options,19)) # 19 comes from 4 estimators, all returning 2 coefficients, mean and var
+    counter     <- 1
+    for (i in 1:length(alpha.range)){
+        MCD.varlist$h <- alpha.range[i]*n
+        for (j in 1:length(cont.types.range)){
+            for (k in 1:length(cont.level.range)){  
+                run <- RobustSimulation(n = n, 
+                                        sim = sim, 
+                                        cont.level = cont.level.range[k], 
+                                        cont.type = cont.types.range[j], 
+                                        MCD.varlist = MCD.varlist, 
+                                        alpha = alpha.range[i])       
+                mean <- lapply(run, function(x) colMeans(x))
+                var  <- lapply(run, function(x) sqrt(diag(var(x))))
+                if (counter == 1){
+                    names(output) <- c("alpha","Cont.Type","Cont.Level",
+                                       paste(names(unlist(mean)),"mean", sep = "."),
+                                       paste(names(unlist(var)),"var", sep = "."))
+                }
+                output[counter,(1:3)]  <- cbind(alpha.range[i],cont.types.range[j],cont.level.range[k])
+                output[counter,-(1:3)] <- cbind(unlist(mean),unlist(var))
+                counter <- counter + 1
+            }
+        }
+    }
+    return(output)
+}
+
+sim.res <- SimulationGrid(n = n, 
+                       sim = sim,  
+                       cont.level.range = cont.level.range, 
+                       cont.types.range = cont.types.range, 
+                       alpha.range= alpha.range, 
+                       MCD.varlist = MCD.varlist)
+
+## Do a variable selection on x.noNA
+# First make model matrix
+x.exp <- model.matrix(~., data = x.noNA)[,-1]
+
+variableSelect <- function(data){
+    all.sign <- FALSE
+    while (all.sign == FALSE){
+        MM.res   <- lmrob(MPG~data, k.max = 500, refine.tol = 1e-05)
+        p.val    <- summary(MM.res)$coefficients[,4] 
+        if (max(p.val) <= 0.05){
+            all.sign <- TRUE
+            # summary(MM.res)
+        }else{
+            drop.var <- gsub("data", "", names(sort(p.val, decreasing = TRUE)[1]))
+            var.sel  <- colnames(data)[!(colnames(data) %in% drop.var)] 
+            data    <- data[,colnames(data) %in% var.sel]
+        }
+    }
+    return(list(var.sel  = var.sel,
+                data.sel = data))
+}
+
+data.select <- variableSelect(x.exp)
+
+# Apply multiple regression estimators on dataset with selectedd variables
+MCD.varlist <- list(
+    h0           = alpha0*nrow(x.exp),  
+    h            = alpha*nrow(x.exp),
+    cov.fun.list = cov.fun.list, 
+    eps          = 1e-10, 
+    delta        = 0.025)
+TopGear.res <- MultipleRegression(x = data.select$data.sel, y = MPG, MCD.varlist, alpha)
+
+S.list <- lapply(cov.fun.list, function(x) x(test))
+
+View(data.select$data.sel)
 
