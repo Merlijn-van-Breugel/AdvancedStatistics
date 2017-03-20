@@ -442,7 +442,7 @@ MCD.varlist <- list(
     delta        = 0.025)
 TopGear.res <- MultipleRegression(x = data.select$data.sel, y = MPG, MCD.varlist, alpha)
 
-S.list <- lapply(cov.fun.list, function(x) x(test))
+lapply(cov.fun.list, function(x) x(scale(test)))
 
 View(data.select$data.sel)
 
