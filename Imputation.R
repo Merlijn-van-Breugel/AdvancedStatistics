@@ -29,14 +29,11 @@ setwd("C:\\Users\\Merlijn\\Documents\\GitHub\\AdvancedStatistics")
 # Load packages
 require(foreach)
 require(parallel)
-install.packages('doParallel')
-require(abind)
-library(doParallel)  
+require(doParallel)
 require(snow)
 require(VIM)
 require(robustbase)   
-# Load data
-load("biopics.RData")
+
 # Set seed. Best-practice: large seed for more randomness
 set.seed(42424242)
 
@@ -87,8 +84,6 @@ multimp <- function(x, m = NULL, mixed = NULL, robust = FALSE, robMethod = 'MM',
     names(xList) <- paste0('Imputation',1:m)
     return(xList) 
 }
-
-xList <- multimp(x)
 
 # Fit regression models
 # Input:
@@ -219,11 +214,10 @@ bootstrap <- function(x, y.name = 'y', R = 1000, k = 5, method = 'MM', ...) {
     names.var  <- names(x)
     n.obs <- NROW(x)
     n.var <- (NCOL(x)-1)
-    # Already compute formula for regression
+    # Already construct formula for regression
     fm <- paste0(y.name,'~',paste0(names(x)[(names(x) != y.name)],collapse = '+'))
     
     ## Get R bootstrap samples with regression results
-    
     # Massive improvement by parallelization
     cores <- detectCores()
     cl <- makePSOCKcluster(cores)
@@ -233,17 +227,19 @@ bootstrap <- function(x, y.name = 'y', R = 1000, k = 5, method = 'MM', ...) {
     clusterCall(cl, function(){library(robustbase)})
     
     rank.full <- ncol(model.matrix(~., data=x))
-    # time.start <- Sys.time()
+    time.start <- Sys.time()
     bootstrap.res <-  foreach(i=1:R, .combine=rbind) %dopar% {  
  
-        rank = Inf
-
-        while (rank >= rank.full){
-        # Sample n observations with replacement
         s <- x[sample(NROW(x), n.obs, replace = TRUE),]
-        # Matrix should be of full rank
-        rank <- qr(model.matrix(~., data=s))$rank
-        }
+        # print(qr(model.matrix(~., data=s))$rank)
+        # rank = Inf
+        # 
+        # while (rank >= rank.full){
+        # # Sample n observations with replacement
+        # 
+        # # Matrix should be of full rank
+        # rank <- qr(model.matrix(~., data=s))$rank
+        # }
         # Impute sample to get complete data matrix
         
         # We use kNN method from the VIM package for single imputation
@@ -251,15 +247,15 @@ bootstrap <- function(x, y.name = 'y', R = 1000, k = 5, method = 'MM', ...) {
         
         # Fit regression models
         if (method == 'MM'){
-            fit <- lmrob(fm,data = sample.imp, method = 'MM',setting='KS2014')
+            fit <- lmrob(fm,data = sample.imp, method = 'MM')
         }else if (method == 'OLS'){
             fit <- lm(fm,data = sample.imp)
         }
-        
+        print(i)
         fit[['coefficients']] 
     }
-    # time.end <- Sys.time()
-    # time.end - time.start 
+    time.end <- Sys.time()
+    time.end - time.start 
     # Stop parallel cluster workers
     stopCluster(cl)
     coef.mean <- colMeans(bootstrap.res)
@@ -279,7 +275,7 @@ bootstrap <- function(x, y.name = 'y', R = 1000, k = 5, method = 'MM', ...) {
     return(output.table)    
 }
 
-bootstrap <- bootstrap(x, k = 5, R = 10)
+# bootstrap <- bootstrap(x, k = 5, R = 10)
 
 ## Function to create dataset with missing data and outliers
 
@@ -590,6 +586,76 @@ sim.res <- SimulationGrid(sim = 10,
 ## Analyze the biopics data                                                    #                 
 ################################################################################
 
+# Load data
+load("biopics.RData")
+# Convert variables to numeric whenever possible
+apply(biopics,2,function(x) mode(x))
+var.num <- c('year_release','box_office','number_of_subjects','person_of_color')
+biopics[,var.num] <- apply(biopics[,var.num],2,function(x) as.numeric(x))
+
+## Visualize the missings using VIM package
+## Only code for relevant plots are given
+
+# Choose slightly less pronounced colors
+# colors <- c('skyblue2','firebrick1','gray80')
+
+# VIM package does not allow for long variable names in plot labels
+# therefore, map variable to shorter ones
+biopics.NA <- biopics
+names(biopics.NA) <- c('title','country','year','box.office','n.subject',
+                       'type','race','color','gender')
+# Which variables contain missings?
+var.mis <- colnames(biopics.NA[,colSums(is.na(biopics.NA))>0])
+aggr(biopics.NA[,var.mis], numbers = TRUE,only.miss = TRUE, bars = TRUE)
+
+# Select names of variable of interest
+inc.vars <- c('country','year','box.office','n.subject',
+              'type','race','color','gender')
+
+# Year seems interesting
+# should be aggregated for a nice plot
+spineMiss(biopics.NA[, c('year','box.office')],
+          breaks = seq(min(biopics.NA$year),
+                       max(biopics.NA$year) + (5 - max(biopics.NA$year) %% 5)
+                       ,5))
+
+spineMiss(biopics.NA[, c('year','race')],
+          breaks = seq(min(biopics.NA$year),
+                       max(biopics.NA$year) + (5 - max(biopics.NA$year) %% 5)
+                       ,5))
+
+# Country also shows some notable results
+spineMiss(biopics.NA[, c('country','box.office')])
+
+marginplot(biopics.NA[, c('year','box.office')], alpha=0.8)
+parcoordMiss(biopics.NA[,inc.vars])
+
+
+# Missings in Box Office seems to be strongly related to year of release
+spineMiss(biopics[, c("year_release","box_office")])
+year.cat <- (biopics$year_release < 1990)
+test <- cbind(year.cat, biopics$box_office)
+spineMiss(cbind(biopics$year_release < 1990), biopics$box_office)
+
+## Scatterplot
+marginplot(biopics[, c("year_release","box_office")], alpha=0.8)
+marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
+marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
+marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
+marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
+marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
+
+# Multivariate case plot
+parcoordMiss(biopics[,-1])
+
+vars <- c("Air.Temp","Humidity","Air.Temp_imp","Humidity_imp")
+scattMiss(biopics[, c("year_release","box_office")], delimiter="imp", alpha=0.6)
+
+marginmatrix(biopics[,2:4], delimiter = "_imp", alpha=0.6)
+mosaicMiss(biopics[,2:4], delimiter = "_imp", alpha=0.6)
+
+parcoordMiss(biopics[,c("subject_race","type_of_subject","person_of_color","subject_gender")],labels = c("subject_race","type_of_subject","person_of_color","subject_gender"))
+
 
 # Run regression with dropped NA observations
 # Get regression formula
@@ -598,10 +664,9 @@ formula <- paste0('box_office~',
                  collapse='+'))
 fit.droppedNA <- lm(formula,data = na.omit(biopics))
 
-# Perform single imputation via kNN
+# Perform single imputation via kNN and use bootstrap for significance
 k = sqrt(NROW(biopics))
-biopics.single.kNN <- kNN(biopics, k = sqrt(NROW(biopics)), imp_var = FALSE)
-fit.kNN <- bootstrap(x = biopics.single.kNN[,-1], y.name = 'box_office', R = 100, k = k, method = 'MM')
+fit.kNN <- bootstrap(x = biopics[,-1], y.name = 'box_office', R = 100, k = k, method = 'MM')
 
 # Perform single imputation via kNN
 k = sqrt(NROW(biopics))
@@ -613,4 +678,10 @@ xList <- multimp(x=sim.data, m = NULL)
 fitList <- fit(xList = xList, y.name = 'y',method = method.sim)
 fit.MultImp <- pool(fitList)
 
+biopics$year_release <- as.numeric(biopics$year_release)
+spineMiss(biopics[, c("year_release","box_office")],breaks=seq(1915,2015,10))
 
+test <- lmrob(formula, data = biopics, method = 'MM',setting = 'KS2014')
+summary(test)
+
+hist(test$rweights)
