@@ -358,7 +358,7 @@ createSimData <- function(base.data,
                                                      sd=1)
             }  else if (mechanism.outlier == 'VertOut'){
                 y[outlying.obs]             <- rnorm(1, 
-                                                     mean = 0.1*mean.y, 
+                                                     mean = 0.1*mean(y), 
                                                      sd = 1)
             }
             outlying.YN[outlying.obs,outlying.var] <- 1
@@ -436,6 +436,7 @@ SimulationGrid <- function(sim = 100, base.data.config,
     # Ugly, but needed: all workers need to have the packages and functions to their disposal
     clusterCall(cl, function(){library(VIM)})
     clusterCall(cl, function(){library(robustbase)})
+    clusterCall(cl, function(){library(MASS)})
     clusterCall(cl, function(){source('createBaseData.R')})
     clusterCall(cl, function(){source('createSimData.R') })
     clusterCall(cl, function(){source('multimp.R') })
@@ -539,13 +540,14 @@ SimulationGrid <- function(sim = 100, base.data.config,
 ################################################################################
 
 # Setup settings of simulation
-base.data.config <- list(n.obs = 100, n.var = 3, 
-                         mean.x = c(3,4,5), 
+base.data.config <- list(n.obs = 200, n.var = 3, 
+                         mean.x = c(3,4,5),
+                         cor = 0.5,
                          sd.x = c(1,1,1), sd.y = 1,
-                         c = -10, coef = c(1,2,3))
+                         c = -5, coef = c(1,2,3))
 
 mechanism.outlier.range <- c("GoodLev","BadLev","VertOut")
-mechanism.miss.range <- c("None","MCAR","MAR","MNAR")
+mechanism.miss.range <- c("MCAR","MAR","MNAR")
 prop.miss.range <- seq(0.1,0.3,0.1)
 prop.outlier.range <- seq(0,0.2,0.2)
 
@@ -560,11 +562,11 @@ set.seed(20170423)
 
 ## Please not that both data generating functions should be source-able from file,
 # such that the parallel workers can reach them 
-sim.res <- SimulationGrid(sim = 100, 
+sim.res <- SimulationGrid(sim = 10, 
                           base.data.config = base.data.config,  
                           mechanism.outlier.range = mechanism.outlier.range, 
-                          prop.outlier.range = mechanism.miss.range,
-                          mechanism.miss.range = prop.miss.range, 
+                          prop.outlier.range = prop.outlier.range,
+                          mechanism.miss.range = mechanism.miss.range, 
                           prop.miss.range = prop.miss.range)
 
 
@@ -651,11 +653,13 @@ fit.droppedNA <- lm(formula,data = na.omit(biopics.NA))
 summary(fit.droppedNA)
 
 ## Perform single imputation via kNN and use bootstrap for significance
+set.seed(201704241)
 k = 5
 fit.kNN <- bootstrap(x = biopics.NA[,inc.vars], y.name = 'box.office', 
                      R = 1000, k = k, method = 'MM')
 
 ## Perform multiple, iterative model-based imputation
+set.seed(2017042412)
 xList <- multimp(x=biopics.NA[,inc.vars]) # Uses default m as percentage missing
 fitList <- fit(xList = xList, y.name = 'box.office', method = 'MM')
 fit.MultImp <- pool(fitList, return.avg.weights.YN = 1)
@@ -747,13 +751,14 @@ OutOfSamplePredictions <- function(x, y.name, k = 5, R = 100, method = 'MM',
     return(median.error)
 }
 
+set.seed(2017042413)
 pred.error <- OutOfSamplePredictions(x = biopics.NA[,inc.vars], 
                                      y.name = 'box.office', 
                                      k = 5, 
                                      R = 100, 
                                      method = 'MM', 
                                      training.sample = 0.7, 
-                                     iterations = 2)
+                                     iterations = 35)
 
 # Get average of median absolute prediction error
 colMeans(pred.error)
