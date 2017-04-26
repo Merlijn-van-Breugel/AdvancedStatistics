@@ -18,7 +18,7 @@ createSimData <- function(base.data,
     
     y <- base.data[,1]
     x <- base.data[,-1]
-    
+    size <- n.obs * (n.var + 1)
     ## Include outliers, re-use part of code from Group Assignment
     # Assign outliers randomly of different explanatory variables
     # Count number of outliers, till prop.outlier achieved
@@ -44,45 +44,45 @@ createSimData <- function(base.data,
                                                      mean = 0.5*mean(y), 
                                                      sd=1)
             }  else if (mechanism.outlier == 'VertOut'){
-                y[outlying.obs]             <- rnorm(prop.outlier*n.obs, 
+                y[outlying.obs]             <- rnorm(1, 
                                                      mean = 0.1*mean.y, 
-                                                     sd = 2)
+                                                     sd = 1)
             }
             outlying.YN[outlying.obs,outlying.var] <- 1
             n.outliers <- sum(outlying.YN)
         }
     }
-    
+    data <- cbind(y,x)
+    miss <- matrix(1,n.obs,(n.var+1)) # Introduce missings by NA
     if (!(prop.miss == 0 | mechanism.miss == 'None')){
         ## Replace prop.miss by NA
         if (mechanism.miss == 'MCAR'){
             # Draw random samples from [0,1] uniform distribution
-            mcar <- matrix(runif(size, min=0, max=1),n.obs,n.var)
+            mcar <- matrix(runif(2*n.obs, min=0, max=1),n.obs,2)
             # All values smaller than the proportion of missings are replaced by NA
-            miss <- ifelse(mcar>prop.miss,1,NA)
-            x.obs <- x * miss
-        }else if(mechanism.miss == 'MAR'){
-            # Create MAR as follows: a covariate in x is missing if y is greater than its miss.prop quantile
-            y.quantiles <- quantile(y, seq(from = .1, to = .9, by = .1)) 
-            miss <- (y >= y.quantiles[10-floor(n.var*prop.miss*10)])
-            x.obs <- x
-            for (i in 1:n.obs){
-                row.miss <- sample(1:n.var,1)
-                x.obs[which(miss)[i],row.miss] <- NA 
-            }
+            # Introduce missings in both y and x
+            miss[,1:2] <- ifelse(mcar>((n.var/2)*prop.miss),1,NA)
+            data <- data * miss
+        }else if(mechanisms.miss == 'MAR'){
+            # Create MAR as follows: a covariate is missing, if another variable is larger than its miss.prop quantile
+            quantiles <- apply(data,2,function(x){
+                quantile(x, seq(from = .01, to = .99, by = .01))})
+            # We impute missings in two variables
+            # In both roughly equally many missings
+            # Hence, the corresponding quantile should be greater than 100-floor((n.var/2)*prop.miss*100)
+            miss[,1] <- ifelse(data[,2] < quantiles[100-floor((n.var/2)*prop.miss*100),2],1,NA)                    
+            miss[,2] <- ifelse(data[,3] < quantiles[100-floor((n.var/2)*prop.miss*100),3],1,NA)
+            data <- data * miss
         }else if(mechanism.miss == 'MNAR'){
             # Values are missing conditional on their own value
-            x.quantiles <- apply(x, 2, function(x){
-                quantile(x, seq(from = .1, to = .9, by = .1))})
-            x.obs <- x
-            for (i in 1:n.obs){
-                miss <- ifelse(x.obs[i,] > x.quantiles[10-floor(prop.miss*10),],NA,1)
-                x.obs[i,] <- x.obs[i,] * miss
-            }
+            quantiles <- apply(data,2,function(x){
+                quantile(x, seq(from = .01, to = .99, by = .01))})
+            miss[,1] <- ifelse(data[,1] < quantiles[100-floor((n.var/2)*prop.miss*100),1],1,NA)                    
+            miss[,2] <- ifelse(data[,2] < quantiles[100-floor((n.var/2)*prop.miss*100),2],1,NA)
+            data <- data * miss
         }
-    }else{x.obs <- x}
-    sum(is.na(x.obs)) #This should be roughly equal to n.obs * n.var * prop.miss
+    }
     return(list(
-        data = cbind(y,x.obs),
-        prop.miss = sum(is.na(x.obs))/size))
+        data = data,
+        prop.miss = sum(is.na(data))/size))
 }

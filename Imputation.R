@@ -32,10 +32,18 @@ require(parallel)
 require(doParallel)
 require(snow)
 require(VIM)
-require(robustbase)   
+require(robustbase)  
+require(MASS)
 
 # Set seed. Best-practice: large seed for more randomness
 set.seed(42424242)
+
+# Make sure functions are loaded, needed for parallel function
+source('createBaseData.R')
+source('createSimData.R')
+source('multimp.R')
+source('fit.R')
+source('pool.R')
 
 
 ################################################################################
@@ -54,8 +62,8 @@ set.seed(42424242)
 #                if 'None' then no Robust Method is applied
 # Output:
 # A list containing the m imputed data sets
-multimp <- function(x, m = NULL, mixed = NULL, robust = FALSE, robMethod = 'MM', init.method = 'kNN',
-                    ...) {
+multimp <- function(x, m = NULL, mixed = NULL, robust = FALSE, robMethod = 'MM', 
+                    init.method = 'kNN',...) {
     
     # Set a sensible default for the number of imputations m
     # Follow advice of Bodner (2008) and White et al. (2011), set m default to.. 
@@ -64,16 +72,6 @@ multimp <- function(x, m = NULL, mixed = NULL, robust = FALSE, robMethod = 'MM',
         m <- 5*round(100*mean(is.na(x))/5)
     }
     ## Use function irmi() from VIM package multiple imputations
-    
-    # Check whether there are semi-continuous variables
-    # Here we use a rather ambiguous threshold, but this is more of a sanity check
-    if (is.null(mixed)){
-        mixed <- apply(x, 
-                       2, 
-                       function(x) {(sum(x == 0, na.rm = TRUE)/NROW(x)) > 0.2 } )
-        if (sum(mixed) == 0){
-            mixed <- NULL}
-    }   
     xList <- irmi(x, 
                   maxit = 100, 
                   mi = m, 
@@ -94,22 +92,17 @@ multimp <- function(x, m = NULL, mixed = NULL, robust = FALSE, robMethod = 'MM',
 # ........ control parameters for the MM-algorithm)
 # Output:
 # A list of regression models (each fitted to one of the imputed data sets)
-fit <- function(xList, y.name = 'V1', method = 'MM', method.inputList = NA, ...) {
+fit <- function(xList, y.name = 'y', method = 'MM', method.inputList = NA, ...){
     
     # Split y and x from xList
     yList     <- lapply(xList, function(x){x[names(x)==y.name]})
     
     ## Perform selected regression method
-    # Check whether input method is allowed
-    # if (!(method %in% c('OLS','MM'))){
-    #     warning('Chosen regression method is not supported, MM is chosen instead')
-    #     method <- 'MM'
-    # }
     # Create formula for regression
     fm <- paste0(y.name,'~',paste0(names(xList[[1]])[(names(xList[[1]]) != y.name)],collapse = '+'))
     # Fit regression models
     if (method == 'MM'){
-        fit <- lapply(xList, function(x){lmrob(fm,data = x, method = 'MM',setting = 'KS2014')})
+        fit <- lapply(xList, function(x){lmrob(fm,data = x, method = 'MM',setting = 'KS2014',k.max = 200)})
     }else if (method == 'OLS'){
         fit <- lapply(xList, function(x){lm(fm,data = x)})
     }
@@ -126,15 +119,8 @@ fit <- function(xList, y.name = 'V1', method = 'MM', method.inputList = NA, ...)
 # pooled standard errors in the second column, the t-statistic in the third
 # column, the estimated degrees of freedom in the fourth column, and the
 # p-value in the fifth column (see slide 50 of Lecture 5 for an example)
-pool <- function(fitList, ...) {
+pool <- function(fitList, return.avg.weights.YN = FALSE,...) {
     
-    # # Check whether input only contains OLS and MM models
-    # log <- sapply(fitList, function(x){
-    #                 method <- (summary(x))[['call']][['method']]
-    #                 if (!(method %in% c('OLS','MM'))){
-    #                 stop('Regression model input has to be OLS or MM model')
-    #                 }
-    # })
     # Retrieve useful parameters
     names.var  <- names(fitList[[1]][['coefficients']])
     n.obs <- NROW(fitList[[1]]$x)
@@ -144,7 +130,6 @@ pool <- function(fitList, ...) {
     # Start with pooled coefficients estimates
     mean.pool <- sapply(seq(1:n.var), function(i)
     {
-        # m <- sapply(lapply(fitList, `[[`, 'coefficients'), function(x) x[i])
         coef <- sapply(fitList, function(x){coef(summary(x))[i,'Estimate']})
         mean(coef)
     }) 
@@ -160,7 +145,7 @@ pool <- function(fitList, ...) {
         b <-   sapply(fitList, 
                       function(x){
                           (coef(summary(x))[i,'Estimate']
-                           - coef.mean[i])^2})
+                           - mean.pool[i])^2})
         (1/(m-1)) * sum(b)
     })
     # Combine both variances into pooled variance
@@ -182,16 +167,29 @@ pool <- function(fitList, ...) {
     symp <- symnum(p.val, corr = FALSE,
                    cutpoints = c(0,  .001,.01,.05, .1, 1),
                    symbols = c("***","**","*","."," "))
-    output.table <- as.matrix(data.frame('Estimate' = mean.pool,
+    
+    output.table <- (data.frame('Estimate' = mean.pool,
                                          'Std.Error' = sd,
                                          't.value' = t.stat,
                                          'df' = df,
-                                         'p.val' = p.val))
-    rownames(output.table) <- names.var
-    return(output.table)
+                                         'p.val' = p.val,
+                                         'sign' = symp ))
+    rownames(output.table) <- names.var    
+    # If asked by user, also return average robustness weights
+    if (return.avg.weights.YN == TRUE){
+        mean.rweights <- sapply(seq(1:n.obs), function(i)
+        {
+            rweights <- sapply(fitList, function(x){x[['rweights']][i]})
+            mean(rweights)
+        })        
+        output <- list(output.table = output.table,
+                        mean.rweights = mean.rweights)
+    }else{
+        output <- output.table
+    }
+    
+    return(output)
 }
-
-output <- pool(fitList)
 
 ## Function for the bootstrap with kNN imputation and linear regression
 # Input:
@@ -199,8 +197,6 @@ output <- pool(fitList)
 # R       number of replications
 # k       number of neighbors for kNN imputation
 # method  character string specifying whether to use OLS or MM-estimator
-# ...     additional arguments to be passed to modeling function (for example,
-#         control parameters for the MM-algorithm)
 # Output:
 # A list with the following components:
 # replicates  a matrix with all coefficient estimates from all replications
@@ -209,7 +205,7 @@ output <- pool(fitList)
 #             z-statistic in the third column, and the p-value in the fourth
 #             column (see slide 29 of Lecture 5 for an example)
 bootstrap <- function(x, y.name = 'y', R = 1000, k = 5, method = 'MM', ...) {
-
+    
     # Retrieve useful parameters
     names.var  <- names(x)
     n.obs <- NROW(x)
@@ -225,37 +221,29 @@ bootstrap <- function(x, y.name = 'y', R = 1000, k = 5, method = 'MM', ...) {
     # Ugly, but needed: all workers need to have the packages and functions to their disposal
     clusterCall(cl, function(){library(VIM)})
     clusterCall(cl, function(){library(robustbase)})
-    
-    rank.full <- ncol(model.matrix(~., data=x))
-    time.start <- Sys.time()
+
+    # time.start <- Sys.time()
     bootstrap.res <-  foreach(i=1:R, .combine=rbind) %dopar% {  
- 
-        s <- x[sample(NROW(x), n.obs, replace = TRUE),]
-        # print(qr(model.matrix(~., data=s))$rank)
-        # rank = Inf
-        # 
-        # while (rank >= rank.full){
-        # # Sample n observations with replacement
-        # 
-        # # Matrix should be of full rank
-        # rank <- qr(model.matrix(~., data=s))$rank
-        # }
-        # Impute sample to get complete data matrix
         
+        s <- x[sample(NROW(x), n.obs, replace = TRUE),]
         # We use kNN method from the VIM package for single imputation
         sample.imp <- kNN(s, k = k, imp_var = FALSE)
-        
         # Fit regression models
         if (method == 'MM'){
-            fit <- lmrob(fm,data = sample.imp, method = 'MM')
+            fit <- tryCatch( 
+                lmrob(fm,data = sample.imp, method = 'MM', setting="KS2014",k.max = 200)
+                ,error=function(e){e})
+            # we have an instance that is corrupted
+            if (any(class(fit) %in% "error")) { 
+                R <- R+1 # Perform an extra iteration
+            }
         }else if (method == 'OLS'){
             fit <- lm(fm,data = sample.imp)
         }
-        print(i)
         fit[['coefficients']] 
     }
-    time.end <- Sys.time()
-    time.end - time.start 
+    # time.end <- Sys.time()
+    # time.end - time.start 
     # Stop parallel cluster workers
     stopCluster(cl)
     coef.mean <- colMeans(bootstrap.res)
@@ -263,28 +251,32 @@ bootstrap <- function(x, y.name = 'y', R = 1000, k = 5, method = 'MM', ...) {
     # Compute standard deviation of bootstrap replicates
     sd <- sqrt((1/(R-1))*colSums(sweep(bootstrap.res,2,coef.mean)^2))  
     
-    # Get t-statistics based on pooled mean and variance
-    t.stat <- coef.mean/sd
-    df = n.obs - n.var - 1
+    # Assume asymptotic normality
+    z.stat <- coef.mean/sd
+
     # Two-sided, get p value
-    p.val <- 2*pt(abs(t.stat), df = df, lower = FALSE) 
-    output.table <- as.matrix(data.frame('Estimate' = coef.mean,
+    p.val <- 2*pnorm(abs(z.stat), lower = FALSE) 
+    # Nice function to get significance
+    symp <- symnum(p.val, corr = FALSE,
+                   cutpoints = c(0,  .001,.01,.05, .1, 1),
+                   symbols = c("***","**","*","."," "))
+    output.table <- (data.frame('Estimate' = coef.mean,
                                          'Std.Error' = sd,
                                          't.value' = t.stat,
-                                         'p.val' = p.val))
+                                         'p.val' = p.val,
+                                         'sign' = symp))
     return(output.table)    
 }
 
-# bootstrap <- bootstrap(x, k = 5, R = 10)
+## Functions to create dataset with missing data and outliers
 
-## Function to create dataset with missing data and outliers
-
-## Create simulation data
+## Create base data
 ## Input:
 ## Data itself: 
 # n.obs .............. number of observations
 # n.var .............. number of variables, dependent variable y excluded 
 # mean.x ............. give means of explanatory variables (for rnorm) 
+# factor.cor ......... defines how x[,nvar] is related to x[,nvar-1]
 # sd.x ............... give standard deviation of explanatory variables (for rnorm)
 # sd.y ............... give standard deviation of dependent variable (for rnorm)
 # c .................. intercept for dependent variable
@@ -293,16 +285,28 @@ bootstrap <- function(x, y.name = 'y', R = 1000, k = 5, method = 'MM', ...) {
 # A single data set for simulation purposes
 
 createBaseData <- function(n.obs = 100, n.var = 3, 
-                           mean.x = c(5,10,15), 
-                           sd.x = c(1,2,3), sd.y = 2,
+                           mean.x = c(1,2,3),
+                           corx1x2 = 0.5, 
+                           sd.x = c(1,1,1), sd.y = 1,
                            c = -5, coef = c(1,2,3)){
     
     ## Create base data set
     # Create p-1 explanatory variables that are normally distributed 
-    x <- mapply(function(x,y){rnorm(x,y,n=n.obs)},x=mean.x,y=sd.x)
+    # We let two variables be correlated to mimick the biopics set 
+    
+    # Make correlation matrix for explanatories, correlate between x1 and x2
+    if (n.var >= 2 & !is.na(corx1x2)){    
+    cor <- as.matrix(diag(sd.x),n.var,n.var) 
+    cor[1,2] <- corx1x2 * sd.x[1] * sd.x[2]
+    cor[2,1] <- corx1x2 * sd.x[1] * sd.x[2]
+    x <- mvrnorm(n = n.obs, mu = mean.x, Sigma = cor)
+    }else{
+        y <- rnorm(n.obs, mean.x[1], sd = sd.x[1])
+    }
+    
     colnames(x) <- paste0('x',1:n.var)
     # Compute y, given the pre-defined coefficients
-    y <- rnorm(n, mean = c + x %*% coef, sd = sd.y)
+    y <- rnorm(n.obs, mean = c + x %*% coef, sd = sd.y)
     
     return(cbind(y,x))
 }
@@ -327,7 +331,7 @@ createSimData <- function(base.data,
     
     y <- base.data[,1]
     x <- base.data[,-1]
-    
+    size <- n.obs * (n.var + 1)
     ## Include outliers, re-use part of code from Group Assignment
     # Assign outliers randomly of different explanatory variables
     # Count number of outliers, till prop.outlier achieved
@@ -353,71 +357,53 @@ createSimData <- function(base.data,
                                                      mean = 0.5*mean(y), 
                                                      sd=1)
             }  else if (mechanism.outlier == 'VertOut'){
-                y[outlying.obs]             <- rnorm(prop.outlier*n.obs, 
+                y[outlying.obs]             <- rnorm(1, 
                                                      mean = 0.1*mean.y, 
-                                                     sd = 2)
+                                                     sd = 1)
             }
             outlying.YN[outlying.obs,outlying.var] <- 1
             n.outliers <- sum(outlying.YN)
         }
     }
-    
+    data <- cbind(y,x)
+    miss <- matrix(1,n.obs,(n.var+1)) # Introduce missings by NA
     if (!(prop.miss == 0 | mechanism.miss == 'None')){
         ## Replace prop.miss by NA
         if (mechanism.miss == 'MCAR'){
             # Draw random samples from [0,1] uniform distribution
-            mcar <- matrix(runif(size, min=0, max=1),n.obs,n.var)
+            mcar <- matrix(runif(2*n.obs, min=0, max=1),n.obs,2)
             # All values smaller than the proportion of missings are replaced by NA
-            miss <- ifelse(mcar>prop.miss,1,NA)
-            x.obs <- x * miss
+            # Introduce missings in both y and x
+            miss[,1:2] <- ifelse(mcar>((n.var/2)*prop.miss),1,NA)
+            data <- data * miss
         }else if(mechanism.miss == 'MAR'){
-            # Create MAR as follows: a covariate in x is missing if y is greater than its miss.prop quantile
-            y.quantiles <- quantile(y, seq(from = .1, to = .9, by = .1)) 
-            miss <- (y >= y.quantiles[10-floor(n.var*prop.miss*10)])
-            x.obs <- x
-            for (i in 1:n.obs){
-                row.miss <- sample(1:n.var,1)
-                x.obs[which(miss)[i],row.miss] <- NA 
-            }
+            # Create MAR as follows: a covariate is missing, if another variable is larger than its miss.prop quantile
+            quantiles <- apply(data,2,function(x){
+                quantile(x, seq(from = .01, to = .99, by = .01))})
+            # We impute missings in two variables
+            # In both roughly equally many missings
+            # Hence, the corresponding quantile should be greater than 100-floor((n.var/2)*prop.miss*100)
+            miss[,1] <- ifelse(data[,2] < quantiles[100-floor((n.var/2)*prop.miss*100),2],1,NA)                    
+            miss[,2] <- ifelse(data[,3] < quantiles[100-floor((n.var/2)*prop.miss*100),3],1,NA)
+            data <- data * miss
         }else if(mechanism.miss == 'MNAR'){
             # Values are missing conditional on their own value
-            x.quantiles <- apply(x, 2, function(x){
-                quantile(x, seq(from = .1, to = .9, by = .1))})
-            x.obs <- x
-            for (i in 1:n.obs){
-                miss <- ifelse(x.obs[i,] > x.quantiles[10-floor(prop.miss*10),],NA,1)
-                x.obs[i,] <- x.obs[i,] * miss
-            }
+            quantiles <- apply(data,2,function(x){
+                quantile(x, seq(from = .01, to = .99, by = .01))})
+            miss[,1] <- ifelse(data[,1] < quantiles[100-floor((n.var/2)*prop.miss*100),1],1,NA)                    
+            miss[,2] <- ifelse(data[,2] < quantiles[100-floor((n.var/2)*prop.miss*100),2],1,NA)
+            data <- data * miss
         }
-    }else{x.obs <- x}
-    sum(is.na(x.obs)) #This should be roughly equal to n.obs * n.var * prop.miss
+    }
     return(list(
-        data = cbind(y,x.obs),
-        prop.miss = sum(is.na(x.obs))/size))
+        data = data,
+        prop.miss = sum(is.na(data))/size))
 }
-
-# Create data set with missings
-base.data <- createBaseData(n.obs = 100, n.var = 3, 
-                            mean.x = c(5,10,15), 
-                            sd.x = c(1,2,3), sd.y = 2,
-                            c = -5, coef = c(1,2,3))
-
-sim.data <- createSimData(base.data = base.data,
-                          n.obs = 100, n.var = 3, 
-                          mean.x = c(5,10,15), 
-                          sd.x = c(1,2,3), sd.y = 2,
-                          c = -5, coef,
-                          mechanism.miss = 'None', prop.miss = 0, 
-                          mechanism.outlier = 'None', prop.outlier = 0)$data
-
-
-################################################################################
-## Perform simulation study                                                    #                 
-################################################################################
 
 ## Function to perform multiple simulations oevr a variety of configurations
 SimulationGrid <- function(sim = 100, base.data.config, 
                            m = NULL,
+                           k = 5,
                            mechanism.outlier.range, prop.outlier.range,
                            mechanism.miss.range, prop.miss.range, ...){
     
@@ -428,8 +414,8 @@ SimulationGrid <- function(sim = 100, base.data.config,
     
     # Create data frame to write output into
     n.options   <- length(mechanism.outlier.range)*
-        length(prop.outlier.range)*
         length(mechanism.miss.range)*
+        length(prop.outlier.range)*
         length(prop.miss.range)
     n.est  <- n.var.c * 2 * 2 #Single and multiple imputation, with OLS and MM
     res <- array(NA,dim = c(sim,n.est,n.options))
@@ -438,7 +424,7 @@ SimulationGrid <- function(sim = 100, base.data.config,
     # This split in data generation process is relevant, as we do not want to sample new data for all configuration
     # Given a base set, we want inclusion of NA and outliers
     # We repeat this process for a variety of random base sets, to check for consistency
-
+    
     # Count in which configuration the simulation is, for storing results
     count.config <- 1
     config.name <- matrix(NA,n.options,1)
@@ -452,7 +438,9 @@ SimulationGrid <- function(sim = 100, base.data.config,
     clusterCall(cl, function(){library(robustbase)})
     clusterCall(cl, function(){source('createBaseData.R')})
     clusterCall(cl, function(){source('createSimData.R') })
-        
+    clusterCall(cl, function(){source('multimp.R') })
+    clusterCall(cl, function(){source('fit.R') })
+    clusterCall(cl, function(){source('pool.R') })
     
     # Now loop over all configurations
     for (i in 1:length(mechanism.miss.range)){
@@ -461,12 +449,6 @@ SimulationGrid <- function(sim = 100, base.data.config,
                 for (l in 1:length(prop.outlier.range)){
                     # For each configuration, we run this sim times
                     config.run <- foreach(s=1:sim, .combine=rbind) %dopar% {
-                         # For the first workers, we have to source our functions and packages
-                         # if (s <= detectCores()){
-                         #    library(VIM)
-                         #    library(robustbase)
-                         #    source('createBaseData.R')
-                         #    source('createSimData.R')} 
                         base.data <- createBaseData(n.obs = n.obs, 
                                                     n.var = n.var, 
                                                     mean.x = base.data.config$mean.x, 
@@ -487,13 +469,13 @@ SimulationGrid <- function(sim = 100, base.data.config,
                                                   prop.miss = prop.miss.range[j],
                                                   mechanism.outlier = mechanism.outlier.range[k],
                                                   prop.outlier = prop.outlier.range[l])$data
-                        colnames(sim.data) <- colnames(base.data) # Weird, should not be needed
+                        coef.names <- colnames(base.data)
+                        colnames(sim.data) <- coef.names # Weird, should not be needed
                         regress.coef <- NULL
                         
-                        # Choose k in accordance to convention: sqrt(N)
-                        sim.data.kNN <- as.matrix(kNN(sim.data, k = sqrt(n.obs), imp_var = FALSE))
+                        sim.data.kNN <- as.matrix(kNN(sim.data, k = k, imp_var = FALSE))
                         xList <- multimp(x=sim.data, m = NULL)
-                        
+
                         for (method.sim in c('OLS','MM')){
                             # Run single imputation kNN and multiple
                             for (method.imp in c('single','multiple')){
@@ -503,15 +485,13 @@ SimulationGrid <- function(sim = 100, base.data.config,
                                     }else if (method.sim == 'MM'){
                                         fit.KNN <- lmrob(sim.data.kNN[,1]~sim.data.kNN[,-1], 
                                                          method = 'MM',
-                                                         setting = 'KS2014')
+                                                         setting = 'KS2014',
+                                                         k.max = 200)
                                     }
                                     coef <- fit.KNN$coefficients
                                 }else if (method.imp == 'multiple'){
                                     fitList <- fit(xList = xList, y.name = 'y',method = method.sim)
                                     coef <- pool(fitList)[,1]
-                                    if (s == 1){
-                                        coef.names <- names(coef)
-                                    }
                                 }
                                 names(coef) <- paste(method.sim,method.imp,coef.names,sep = '.')
                                 regress.coef <- cbind(regress.coef,t(as.matrix(coef)))
@@ -539,7 +519,7 @@ SimulationGrid <- function(sim = 100, base.data.config,
     dimnames(res)[[1]] <- paste('sim',1:sim,sep='.')
     dimnames(res)[[2]] <- colnames(regress.coef)
     dimnames(res)[[3]] <- config.name
-
+    
     # Compute mean and variance of coefficients over simulations
     coef.means <- apply(res,2,function(x){colMeans(x)})
     coef.var <- apply(res,2,function(x){sqrt(diag(var(x)))})
@@ -554,28 +534,34 @@ SimulationGrid <- function(sim = 100, base.data.config,
     return(output.list)        
 }
 
+################################################################################
+## Perform simulation study                                                    #                 
+################################################################################
+
 # Setup settings of simulation
 base.data.config <- list(n.obs = 100, n.var = 3, 
                          mean.x = c(3,4,5), 
                          sd.x = c(1,1,1), sd.y = 1,
-                         c = -25, coef = c(1,2,3))
+                         c = -10, coef = c(1,2,3))
 
 mechanism.outlier.range <- c("GoodLev","BadLev","VertOut")
-mechanism.miss.range <- c("MCAR","MAR","MNAR")
-prop.miss.range <- seq(0.1,0.5,0.1)
-prop.outlier.range <- seq(0.1,0.5,0.1)
+mechanism.miss.range <- c("None","MCAR","MAR","MNAR")
+prop.miss.range <- seq(0.1,0.3,0.1)
+prop.outlier.range <- seq(0,0.2,0.2)
 
 mechanism.outlier.range <- c("None")
-mechanism.miss.range <- c("MCAR","MAR","MNAR")
-prop.miss.range <- seq(0.1,0.5,0.1)
+mechanism.miss.range <- c("None","MCAR","MAR","MNAR")
+prop.miss.range <- seq(0.1,0.3,0.1)
 prop.outlier.range <- 0
 
 ## Run simulation
 # Warning, this may take quite a long time
 set.seed(20170423)
-sim.res <- SimulationGrid(sim = 10, 
+
+## Please not that both data generating functions should be source-able from file,
+# such that the parallel workers can reach them 
+sim.res <- SimulationGrid(sim = 100, 
                           base.data.config = base.data.config,  
-                          m = 10,
                           mechanism.outlier.range = mechanism.outlier.range, 
                           prop.outlier.range = mechanism.miss.range,
                           mechanism.miss.range = prop.miss.range, 
@@ -589,28 +575,31 @@ sim.res <- SimulationGrid(sim = 10,
 # Load data
 load("biopics.RData")
 # Convert variables to numeric whenever possible
-apply(biopics,2,function(x) mode(x))
+# apply(biopics,2,function(x) mode(x))
 var.num <- c('year_release','box_office','number_of_subjects','person_of_color')
 biopics[,var.num] <- apply(biopics[,var.num],2,function(x) as.numeric(x))
 
-## Visualize the missings using VIM package
-## Only code for relevant plots are given
+# Transform box office using a log transformation to get more readable estimates
+biopics$box_office <- log(biopics$box_office)
 
-# Choose slightly less pronounced colors
-# colors <- c('skyblue2','firebrick1','gray80')
+# Store names of variable of interest
+inc.vars <- c('country','year','box.office','n.subject',
+              'type','race','color','gender')
 
 # VIM package does not allow for long variable names in plot labels
 # therefore, map variable to shorter ones
 biopics.NA <- biopics
 names(biopics.NA) <- c('title','country','year','box.office','n.subject',
                        'type','race','color','gender')
+
+################################################################################
+## Visualize the missings using VIM package                                    #
+## Only code for relevant plots are given                                      #
+################################################################################
+
 # Which variables contain missings?
 var.mis <- colnames(biopics.NA[,colSums(is.na(biopics.NA))>0])
 aggr(biopics.NA[,var.mis], numbers = TRUE,only.miss = TRUE, bars = TRUE)
-
-# Select names of variable of interest
-inc.vars <- c('country','year','box.office','n.subject',
-              'type','race','color','gender')
 
 # Year seems interesting
 # should be aggregated for a nice plot
@@ -627,61 +616,144 @@ spineMiss(biopics.NA[, c('year','race')],
 # Country also shows some notable results
 spineMiss(biopics.NA[, c('country','box.office')])
 
-marginplot(biopics.NA[, c('year','box.office')], alpha=0.8)
-parcoordMiss(biopics.NA[,inc.vars])
+# Same goes for color and race
+spineMiss(biopics.NA[, c('color','race')])
+# This may be related to the year
+marginmatrix(biopics.NA[, c('year','race','color','country')], alpha=0.6)
 
+# Use bloxplots to look at the triple relation between year, race and box office
+pbox(biopics.NA[,c('year','race','box.office')], selection="none")
 
-# Missings in Box Office seems to be strongly related to year of release
-spineMiss(biopics[, c("year_release","box_office")])
-year.cat <- (biopics$year_release < 1990)
-test <- cbind(year.cat, biopics$box_office)
-spineMiss(cbind(biopics$year_release < 1990), biopics$box_office)
+# Coordinate plot
+parcoordMiss(biopics.NA[,c('race','color','box.office','year')])
+             
+# Multivariate matrix plot
+scattmatrixMiss(biopics.NA[,c('year','race','box.office')], alpha = 0.6)
 
-## Scatterplot
-marginplot(biopics[, c("year_release","box_office")], alpha=0.8)
-marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
-marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
-marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
-marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
-marginplot(biopics[, c("year_release","subject_race")], alpha=0.8)
+# Perform single imputation via kNN, to plot imputed values
+k = 5
+biopics.single.kNN <- kNN(biopics.NA, k = k, imp_var = TRUE)
+marginmatrix(biopics.single.kNN[, c(c('year','race','box.office'),
+                                    c('year_imp','race_imp','box.office_imp'))], alpha=0.6,
+             delimiter = '_imp')
+# Intersting: for larger k, box.offices has generally higher imputed values
 
-# Multivariate case plot
-parcoordMiss(biopics[,-1])
+################################################################################
+## Evaluate in-sample performance                                              #
+################################################################################
 
-vars <- c("Air.Temp","Humidity","Air.Temp_imp","Humidity_imp")
-scattMiss(biopics[, c("year_release","box_office")], delimiter="imp", alpha=0.6)
-
-marginmatrix(biopics[,2:4], delimiter = "_imp", alpha=0.6)
-mosaicMiss(biopics[,2:4], delimiter = "_imp", alpha=0.6)
-
-parcoordMiss(biopics[,c("subject_race","type_of_subject","person_of_color","subject_gender")],labels = c("subject_race","type_of_subject","person_of_color","subject_gender"))
-
-
-# Run regression with dropped NA observations
+## Run regression with dropped NA observations
 # Get regression formula
-formula <- paste0('box_office~',
-                 paste(names(biopics[,!(names(biopics) %in% c('box_office','title'))]),
-                 collapse='+'))
-fit.droppedNA <- lm(formula,data = na.omit(biopics))
+formula <- paste0('box.office~',
+                  paste(names(biopics.NA[,!(names(biopics.NA) %in% c('box.office','title'))]),
+                        collapse='+'))
+fit.droppedNA <- lm(formula,data = na.omit(biopics.NA))
+summary(fit.droppedNA)
 
-# Perform single imputation via kNN and use bootstrap for significance
-k = sqrt(NROW(biopics))
-fit.kNN <- bootstrap(x = biopics[,-1], y.name = 'box_office', R = 100, k = k, method = 'MM')
+## Perform single imputation via kNN and use bootstrap for significance
+k = 5
+fit.kNN <- bootstrap(x = biopics.NA[,inc.vars], y.name = 'box.office', 
+                     R = 1000, k = k, method = 'MM')
 
-# Perform single imputation via kNN
-k = sqrt(NROW(biopics))
-biopics.single.kNN <- kNN(biopics, k = sqrt(NROW(biopics)), imp_var = FALSE)
-fit.kNN <- bootstrap(x = biopics.single.kNN[,-1], y.name = 'box_office', R = 100, k = k, method = 'MM')
+## Perform multiple, iterative model-based imputation
+xList <- multimp(x=biopics.NA[,inc.vars]) # Uses default m as percentage missing
+fitList <- fit(xList = xList, y.name = 'box.office', method = 'MM')
+fit.MultImp <- pool(fitList, return.avg.weights.YN = 1)
+fit.MultImp$output.table
 
-# Perform multiple imputation
-xList <- multimp(x=sim.data, m = NULL)
-fitList <- fit(xList = xList, y.name = 'y',method = method.sim)
-fit.MultImp <- pool(fitList)
 
-biopics$year_release <- as.numeric(biopics$year_release)
-spineMiss(biopics[, c("year_release","box_office")],breaks=seq(1915,2015,10))
+# Inspect robustness weights 
+rweights <- fit.MultImp$mean.rweights
+table(cut(rweights,breaks = seq(0,1,0.1)))
+# Being very conservative (choose threshold = 0.5), we get roughly 12 potential outliers 
 
-test <- lmrob(formula, data = biopics, method = 'MM',setting = 'KS2014')
-summary(test)
+outlier <- ifelse(rweights<0.5,'red','gray')
+miss <- ifelse(is.na(biopics.NA$box.office),'red','gray')
+plot(biopics.single.kNN[,c('box.office','year')],col = outlier)
+plot(biopics.single.kNN[,c('box.office','year')],col = miss)
 
-hist(test$rweights)
+################################################################################
+## Examine predictive performance                                              #
+################################################################################
+
+## Note:
+# We are to construct many random training and test sets
+# For all methods, imputation is first performed on the training set only
+# The test set is imputed with kNN for all methods
+
+# First, inspect how many observations can be regarded as outlier
+
+OutOfSamplePredictions <- function(x, y.name, k = 5, R = 100, method = 'MM', 
+                                   training.sample = 0.7, iterations = 100) {
+    
+    # LTS gives weight 1 to 257 (90.2%) observation in the reweighted estimator. Hence around 10 percent of the observation are outliers.
+    # Therefore we compute the 90 percent quantile of the absolute in-sample prediction errors of the MM regression
+    # and use this value as tuning parameter c for the tukey bisquared loss function, which is used to determine the out-of-sample prediction errors
+
+    median.error <- as.data.frame(matrix(0, iterations, 3))
+    names(median.error) <- c("DroppedNA", "SiBootstrap", "MultImp")
+    prediction.errors    <- list(DroppedNA = NULL, SiBootstrap = NULL, MultImp = NULL)
+    n.obs <- NROW(x)
+    n.train <- ceiling(training.sample * n.obs)
+    formula <- paste0('box.office~',
+                      paste(names(x[,!(names(x) %in% y.name)]),
+                            collapse='+'))
+    
+    for (i in 1:iterations) {
+        #Randomly permute rows of dataset.seed(i)
+        x.perm <- x[sample(n.obs),]
+        x.train <- x.perm[1:n.train,]
+
+        # Note that it is somewhat easier to directly filter only explanatory
+        # Variables from x
+
+        # Model to model.matrix
+        x.test  <- x.perm[(n.train+1):n.obs,] 
+        x.test <- model.matrix(~., data = x.test)
+        y.test <- x.test[,y.name] 
+        # Easier to drop response vatiable
+        x.test <- x.test[,(colnames(x.test) != y.name)] 
+
+        # One could also first impute the test data set
+        # x.perm.impt <- kNN(x.perm, k = k, imp_var = FALSE)
+        # x.test  <- x.perm.impt[(n.train+1):n.obs,] 
+        # y.test <- x.perm.impt[(n.train+1):n.obs,(names(x.perm.impt) == y.name)] 
+        
+        ## Run models
+        # With dropped NA
+        fit.droppedNA <- lmrob(formula,data = na.omit(x.train), method = 'MM',k.max = 200)
+        
+        ## Perform single imputation via kNN and use bootstrap for significance
+        fit.kNN <- bootstrap(x = x.train, y.name = y.name, R = R, k = k, method = method)
+        
+        ## Perform multiple, iterative model-based imputation
+        xList <- multimp(x = x.train) # Uses default m as percentage missing
+        fitList <- fit(xList = xList, y.name = 'box.office', method = 'MM')
+        fit.MultImp <- pool(fitList, return.avg.weights.YN = FALSE) 
+        
+        ## Get prediction error on y.test
+        # Problem with type medicine, only one observation with no other missings
+        # Solution: perform prediction only on variables present in training set
+        names(fit.droppedNA$coefficients)
+        prediction.errors$DroppedNA <- y.test - 
+            x.test[,names(fit.droppedNA$coefficients)] %*% fit.droppedNA$coefficients
+        prediction.errors$SiBootstrap <- y.test - x.test %*% fit.kNN[,1]
+        prediction.errors$MultImp <- y.test - x.test %*% fit.MultImp[,1]
+        
+        median.error[i,] <- sapply(prediction.errors, 
+                                   function(x){median(abs(x)) })
+        noquote(paste0('iteration: ',i))
+    }
+    return(median.error)
+}
+
+pred.error <- OutOfSamplePredictions(x = biopics.NA[,inc.vars], 
+                                     y.name = 'box.office', 
+                                     k = 5, 
+                                     R = 100, 
+                                     method = 'MM', 
+                                     training.sample = 0.7, 
+                                     iterations = 2)
+
+# Get average of median absolute prediction error
+colMeans(pred.error)
