@@ -94,15 +94,14 @@ multimp <- function(x, m = NULL, mixed = NULL, robust = FALSE, robMethod = 'MM',
 # A list of regression models (each fitted to one of the imputed data sets)
 fit <- function(xList, y.name = 'y', method = 'MM', method.inputList = NA, ...){
     
-    # Split y and x from xList
-    yList     <- lapply(xList, function(x){x[names(x)==y.name]})
-    
     ## Perform selected regression method
     # Create formula for regression
     fm <- paste0(y.name,'~',paste0(names(xList[[1]])[(names(xList[[1]]) != y.name)],collapse = '+'))
     # Fit regression models
     if (method == 'MM'){
-        fit <- lapply(xList, function(x){lmrob(fm,data = x, method = 'MM',setting = 'KS2014',k.max = 200)})
+        fit <- lapply(xList, function(x){lmrob(fm,data = x, method = 'MM',
+                                               setting = 'KS2014',
+                                               k.max = 300)})
     }else if (method == 'OLS'){
         fit <- lapply(xList, function(x){lm(fm,data = x)})
     }
@@ -119,13 +118,20 @@ fit <- function(xList, y.name = 'y', method = 'MM', method.inputList = NA, ...){
 # pooled standard errors in the second column, the t-statistic in the third
 # column, the estimated degrees of freedom in the fourth column, and the
 # p-value in the fifth column (see slide 50 of Lecture 5 for an example)
-pool <- function(fitList, return.avg.weights.YN = FALSE,...) {
+pool <- function(fitList, return.more = FALSE, method = 'OLS',...){
     
     # Retrieve useful parameters
     names.var  <- names(fitList[[1]][['coefficients']])
     n.obs <- NROW(fitList[[1]]$x)
     n.var  <- length(fitList[[1]]$coefficients)
     m <- length(fitList)
+
+    # Get converged imputations if MM is used, OLS works fine
+    if (method == 'MM'){
+        fitList <- lapply(fitList,function(x){
+                      if (x[['converged']] == TRUE){x}})
+        fitList <- fitList[!sapply(fitList, is.null)] 
+    }
     
     # Start with pooled coefficients estimates
     mean.pool <- sapply(seq(1:n.var), function(i)
@@ -176,14 +182,15 @@ pool <- function(fitList, return.avg.weights.YN = FALSE,...) {
                                          'sign' = symp ))
     rownames(output.table) <- names.var    
     # If asked by user, also return average robustness weights
-    if (return.avg.weights.YN == TRUE){
+    if (return.more == TRUE){
         mean.rweights <- sapply(seq(1:n.obs), function(i)
         {
             rweights <- sapply(fitList, function(x){x[['rweights']][i]})
             mean(rweights)
         })        
         output <- list(output.table = output.table,
-                        mean.rweights = mean.rweights)
+                       mean.rweights = mean.rweights,
+                       imp.sets = length(fitList))
     }else{
         output <- output.table
     }
@@ -262,7 +269,7 @@ bootstrap <- function(x, y.name = 'y', R = 1000, k = 5, method = 'MM', ...) {
                    symbols = c("***","**","*","."," "))
     output.table <- (data.frame('Estimate' = coef.mean,
                                          'Std.Error' = sd,
-                                         't.value' = t.stat,
+                                         'z.value' = z.stat,
                                          'p.val' = p.val,
                                          'sign' = symp))
     return(output.table)    
@@ -470,7 +477,7 @@ SimulationGrid <- function(sim = 100, base.data.config,
                                                   prop.miss = prop.miss.range[j],
                                                   mechanism.outlier = mechanism.outlier.range[k],
                                                   prop.outlier = prop.outlier.range[l])$data
-                        coef.names <- colnames(base.data)
+                        coef.names <- c('c',colnames(base.data[,-1]))
                         colnames(sim.data) <- coef.names # Weird, should not be needed
                         regress.coef <- NULL
                         
@@ -518,7 +525,7 @@ SimulationGrid <- function(sim = 100, base.data.config,
     stopCluster(cl)
     # For convenience, set dimnames
     dimnames(res)[[1]] <- paste('sim',1:sim,sep='.')
-    dimnames(res)[[2]] <- colnames(regress.coef)
+    dimnames(res)[[2]] <- names(regress.coef[,-(1:(n.var+1))])
     dimnames(res)[[3]] <- config.name
     
     # Compute mean and variance of coefficients over simulations
@@ -656,13 +663,16 @@ summary(fit.droppedNA)
 set.seed(201704241)
 k = 5
 fit.kNN <- bootstrap(x = biopics.NA[,inc.vars], y.name = 'box.office', 
-                     R = 1000, k = k, method = 'MM')
+                     R = 500, k = k, method = 'MM')
 
 ## Perform multiple, iterative model-based imputation
-set.seed(2017042412)
-xList <- multimp(x=biopics.NA[,inc.vars]) # Uses default m as percentage missing
+set.seed(2017040)
+xList <- multimp(x=biopics.NA[,inc.vars], m = 20) 
+# use higher m, to compensate for potential lack of convergence
 fitList <- fit(xList = xList, y.name = 'box.office', method = 'MM')
-fit.MultImp <- pool(fitList, return.avg.weights.YN = 1)
+fit.MultImp <- pool(fitList, return.more = TRUE, method = 'MM')
+# Check how many sets are used
+fit.MultImp$imp.sets
 fit.MultImp$output.table
 
 
@@ -718,10 +728,6 @@ OutOfSamplePredictions <- function(x, y.name, k = 5, R = 100, method = 'MM',
         # Easier to drop response vatiable
         x.test <- x.test[,(colnames(x.test) != y.name)] 
 
-        # One could also first impute the test data set
-        # x.perm.impt <- kNN(x.perm, k = k, imp_var = FALSE)
-        # x.test  <- x.perm.impt[(n.train+1):n.obs,] 
-        # y.test <- x.perm.impt[(n.train+1):n.obs,(names(x.perm.impt) == y.name)] 
         
         ## Run models
         # With dropped NA
@@ -755,10 +761,10 @@ set.seed(2017042413)
 pred.error <- OutOfSamplePredictions(x = biopics.NA[,inc.vars], 
                                      y.name = 'box.office', 
                                      k = 5, 
-                                     R = 100, 
+                                     R = 300, 
                                      method = 'MM', 
                                      training.sample = 0.7, 
-                                     iterations = 35)
+                                     iterations = 100)
 
 # Get average of median absolute prediction error
 colMeans(pred.error)
